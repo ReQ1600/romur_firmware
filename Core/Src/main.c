@@ -44,6 +44,8 @@
 #define LED_GPIO_PORT GPIOA
 #define LED_GPIO_PIN  4
 
+#define MOTOR_STOP_PWM 7.5f
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -103,43 +105,57 @@ void setupMotors()
     uint32_t period = __HAL_TIM_GET_AUTORELOAD(&htim1);
 
     //unlock motors
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1,  7.5 / 100.0 * (period + 1));  // tmp asf
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 7.5 / 100.0 * (period + 1));  // tmp asf
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, 7.5 / 100.0* (period + 1));  // tmp asf
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, 7.5 / 100.0 * (period + 1)); 
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1,  MOTOR_STOP_PWM / 100.0 * (period + 1));  // tmp asf
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, MOTOR_STOP_PWM / 100.0 * (period + 1));  // tmp asf
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, MOTOR_STOP_PWM / 100.0* (period + 1));  // tmp asf
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, MOTOR_STOP_PWM / 100.0 * (period + 1)); 
     HAL_Delay(3000);
 }
 
 // motor frame os of constant size
 void setMotorPWM(uint8_t rxFrame[])
 {
-    // check if values read from rxFrames are within 0-100 boundary
     // first 4 bytes are desired motor pwm duties
     // TODO: if values not withing proper bounds set corresponding motor state to 1
-    if (rxFrame[0] > 100 && rxFrame[1] > 100 && rxFrame[2] > 100 && rxFrame[3] > 100)
+    
+    //converting for easier access
+    int8_t* control_pwm0 = (int8_t*)&rxFrame[0];
+    int8_t* control_pwm1 = (int8_t*)&rxFrame[1];
+    int8_t* control_pwm2 = (int8_t*)&rxFrame[2];
+    int8_t* control_pwm3 = (int8_t*)&rxFrame[3];
+    
+    // calues need to be within <-100:100> range
+    if(*control_pwm0 < -100 || *control_pwm0 > 100)
+    {
+        //SET_ERROR(id_E::MOTOR0, error_E::BAD_VALUE)
         return;
-    uint32_t period = __HAL_TIM_GET_AUTORELOAD(&htim1);
-
-    if (rxFrame[0] > 10)
-    {  
-      rxFrame[0] = 8;
-      rxFrame[1] = 8;
-      rxFrame[2] = 8;
-      rxFrame[3] = 8;
     }
-    else
-      {
-        rxFrame[0] = 0;
-        rxFrame[1] = 0;
-        rxFrame[2] = 0;
-        rxFrame[3] = 0;
-      }
+    if(*control_pwm1 < -100 || *control_pwm1 > 100)
+    {
+        //SET_ERROR(id_E::MOTOR1, error_E::BAD_VALUE)
+        return;
+    }
+    if(*control_pwm2 < -100 || *control_pwm2 > 100)
+    {
+        //SET_ERROR(id_E::MOTOR2, error_E::BAD_VALUE)
+        return;
+    }
+    if(*control_pwm3 < -100 || *control_pwm3 > 100)
+    {
+        //SET_ERROR(id_E::MOTOR3, error_E::BAD_VALUE)
+        return;
+    }
 
-    // TODO: implement pwm mapping
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, rxFrame[0] / 100.f * (period + 1));  // tmp asf
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, rxFrame[1] / 100.f * (period + 1));  // tmp asf
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, rxFrame[2] / 100.f * (period + 1));  // tmp asf
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, rxFrame[3] / 100.f * (period + 1));  // tmp asf
+    uint32_t period = __HAL_TIM_GET_AUTORELOAD(&htim1);
+    float motor0_pwm = *control_pwm0 / 100.0 * 2.5f + MOTOR_STOP_PWM;
+    float motor1_pwm = *control_pwm1 / 100.0 * 2.5f + MOTOR_STOP_PWM;
+    float motor2_pwm = *control_pwm2 / 100.0 * 2.5f + MOTOR_STOP_PWM;
+    float motor3_pwm = *control_pwm3 / 100.0 * 2.5f + MOTOR_STOP_PWM;
+
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, motor0_pwm / 100.0 * (period + 1));
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, motor1_pwm / 100.0 * (period + 1));
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, motor2_pwm / 100.0 * (period + 1));
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, motor3_pwm / 100.0 * (period + 1));
 }
 
 void handlePressureModule()
@@ -565,9 +581,17 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef* huart)
         setMotorPWM(uartRxBuffer);
         // handleModulesOut(uartRxBuffer);
 
-        uint8_t buffer[] = "got\n";
+        uint8_t buffer[8] = {
+            uartRxBuffer[1],
+            uartRxBuffer[2],
+            uartRxBuffer[3],
+            uartRxBuffer[4],
+            uartRxBuffer[5],
+            uartRxBuffer[6],
+            '\n',
+        };
 
-        // HAL_UART_Transmit_IT(&huart2, buffer, sizeof(buffer));
+        HAL_UART_Transmit_IT(&huart2, buffer, sizeof(buffer));
         HAL_UART_Receive_DMA(&huart2, uartRxBuffer, UART_RX_PACKAGE_SIZE);
     }
 }
