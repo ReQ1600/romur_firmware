@@ -1,72 +1,88 @@
 /* USER CODE BEGIN Header */
 /**
- ******************************************************************************
- * @file           : main.c
- * @brief          : Main program body
- ******************************************************************************
- * @attention
- *
- * Copyright (c) 2025 STMicroelectronics.
- * All rights reserved.
- *
- * This software is licensed under terms that can be found in the LICENSE file
- * in the root directory of this software component.
- * If no LICENSE file comes with this software, it is provided AS-IS.
- *
- ******************************************************************************
- */
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : Main program body
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2026 STMicroelectronics.
+  * All rights reserved.
+  *
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
+  ******************************************************************************
+  */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "stm32_hal_legacy.h"
-#include "stm32l432xx.h"
-#include "stm32l4xx_hal.h"
-#include "stm32l4xx_hal_gpio.h"
-#include "stm32l4xx_hal_tim.h"
-#include "stm32l4xx_hal_uart.h"
 #include "string.h"
-#include <stdint.h>
+#include "MS5837_lib.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+enum id_E
+{
+    MOTOR0_ID = 0,
+    MOTOR1_ID = 2,
+    MOTOR2_ID = 4,
+    MOTOR3_ID = 6
+};
 
+enum error_E
+{
+    ERR_NONE      = 0,
+    ERR_BAD_VALUE = 1
+};
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define UART_RX_PACKAGE_SIZE 8  // tmp val
-#define UART_TX_PACKAGE_SIZE 8  // tmp val
-
-#define LED_GPIO_PORT GPIOA
-#define LED_GPIO_PIN  4
+#define UART_RX_PACKAGE_SIZE      8  //  needs to the same as on onboard computer
+#define FEEDBACK_FRAME_BYTE_SIZE 11  //  needs to the same as on onboard computer
 
 #define MOTOR_STOP_PWM 7.5f
+
 
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
+#define SET_HANDLE_MODULES_FLAG() handleModulesFlag = SET
+#define RESET_HANDLE_MODULES_FLAG() handleModulesFlag = RESET
 
+#define SET_MOTOR_ERROR(motor_id, err)                                              \
+    do                                                                              \
+    {                                                                               \
+        motor_errors = (motor_errors & ~(3 << motor_id)) | ((err & 3) << motor_id); \
+    } while (0);
+
+#define CLEAR_ALL_MOTOR_ERRORS()                                                    \
+do                                                                                  \
+{                                                                                   \
+    motor_errors = ERR_NONE;                                                         \
+} while (0);
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
 I2C_HandleTypeDef hi2c1;
 
-SPI_HandleTypeDef hspi1;
-
 TIM_HandleTypeDef htim1;
 
 UART_HandleTypeDef huart2;
-DMA_HandleTypeDef hdma_usart2_tx;
 DMA_HandleTypeDef hdma_usart2_rx;
+DMA_HandleTypeDef hdma_usart2_tx;
 
 /* USER CODE BEGIN PV */
 uint8_t uartRxBuffer[UART_RX_PACKAGE_SIZE] = {0};
-uint8_t uartTxBuffer[UART_TX_PACKAGE_SIZE] = {0};
+
+FlagStatus handleModulesFlag = RESET;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -74,40 +90,35 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_I2C1_Init(void);
-static void MX_SPI1_Init(void);
-static void MX_TIM1_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_TIM1_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
-// TODO: unbloat the frame
 //  rxFrame:
 //  motor0PWMDuty [1B], motor1PWMDuty [1B], motor2PWMDuty [1B], motor3PWMDuty [1B]
 //  MODULES: LED [1B]
 
-// txFrame:
-// boardState | motorStates | LEDState [1B], Module States [...]
-
-// motorStates:
-// 0..2 state [0 - Fine the rest user errors]
-// 3: m1 [0/1 - Fine/Error]
-// 4: m1 [0/1 - Fine/Error]
-// 5: m1 [0/1 - Fine/Error]
-// 6: m1 [0/1 - Fine/Error]
-// 7: led [0/1 - ON/OFF]
+// motor_errors:
+//  0:1 motor0
+//  2:3 motor1
+//  4:5 motor2
+//  6:7 motor3
+uint8_t motor_errors = ERR_NONE;
+uint8_t led_status = 0;
+MS5837_t press_sensor = {0};
 
 void setupMotors()
 {
     uint32_t period = __HAL_TIM_GET_AUTORELOAD(&htim1);
 
     //unlock motors
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1,  MOTOR_STOP_PWM / 100.0 * (period + 1));  // tmp asf
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, MOTOR_STOP_PWM / 100.0 * (period + 1));  // tmp asf
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, MOTOR_STOP_PWM / 100.0* (period + 1));  // tmp asf
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1,  MOTOR_STOP_PWM / 100.0 * (period + 1));
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, MOTOR_STOP_PWM / 100.0 * (period + 1));
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, MOTOR_STOP_PWM / 100.0* (period + 1));
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, MOTOR_STOP_PWM / 100.0 * (period + 1)); 
     HAL_Delay(3000);
 }
@@ -115,42 +126,43 @@ void setupMotors()
 // motor frame os of constant size
 void setMotorPWM(uint8_t rxFrame[])
 {
-    // first 4 bytes are desired motor pwm duties
-    // TODO: if values not withing proper bounds set corresponding motor state to 1
     
-    //converting for easier access
+    // first 4 bytes are desired motor pwm duties
+    // converting for easier access
     int8_t* control_pwm0 = (int8_t*)&rxFrame[0];
     int8_t* control_pwm1 = (int8_t*)&rxFrame[1];
     int8_t* control_pwm2 = (int8_t*)&rxFrame[2];
     int8_t* control_pwm3 = (int8_t*)&rxFrame[3];
-    
+
+    CLEAR_ALL_MOTOR_ERRORS();
+
     // calues need to be within <-100:100> range
-    if(*control_pwm0 < -100 || *control_pwm0 > 100)
+    if (*control_pwm0 < -100 || *control_pwm0 > 100)
     {
-        //SET_ERROR(id_E::MOTOR0, error_E::BAD_VALUE)
+        SET_MOTOR_ERROR(MOTOR0_ID, ERR_BAD_VALUE);
         return;
     }
-    if(*control_pwm1 < -100 || *control_pwm1 > 100)
+    if (*control_pwm1 < -100 || *control_pwm1 > 100)
     {
-        //SET_ERROR(id_E::MOTOR1, error_E::BAD_VALUE)
+        SET_MOTOR_ERROR(MOTOR1_ID, ERR_BAD_VALUE);
         return;
     }
-    if(*control_pwm2 < -100 || *control_pwm2 > 100)
+    if (*control_pwm2 < -100 || *control_pwm2 > 100)
     {
-        //SET_ERROR(id_E::MOTOR2, error_E::BAD_VALUE)
+        SET_MOTOR_ERROR(MOTOR2_ID, ERR_BAD_VALUE);
         return;
     }
-    if(*control_pwm3 < -100 || *control_pwm3 > 100)
+    if (*control_pwm3 < -100 || *control_pwm3 > 100)
     {
-        //SET_ERROR(id_E::MOTOR3, error_E::BAD_VALUE)
+        SET_MOTOR_ERROR(MOTOR3_ID, ERR_BAD_VALUE);
         return;
     }
 
-    uint32_t period = __HAL_TIM_GET_AUTORELOAD(&htim1);
-    float motor0_pwm = *control_pwm0 / 100.0 * 2.5f + MOTOR_STOP_PWM;
-    float motor1_pwm = *control_pwm1 / 100.0 * 2.5f + MOTOR_STOP_PWM;
-    float motor2_pwm = *control_pwm2 / 100.0 * 2.5f + MOTOR_STOP_PWM;
-    float motor3_pwm = *control_pwm3 / 100.0 * 2.5f + MOTOR_STOP_PWM;
+    uint32_t period     = __HAL_TIM_GET_AUTORELOAD(&htim1);
+    float    motor0_pwm = *control_pwm0 / 100.0 * 2.5f + MOTOR_STOP_PWM;
+    float    motor1_pwm = *control_pwm1 / 100.0 * 2.5f + MOTOR_STOP_PWM;
+    float    motor2_pwm = *control_pwm2 / 100.0 * 2.5f + MOTOR_STOP_PWM;
+    float    motor3_pwm = *control_pwm3 / 100.0 * 2.5f + MOTOR_STOP_PWM;
 
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, motor0_pwm / 100.0 * (period + 1));
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, motor1_pwm / 100.0 * (period + 1));
@@ -158,22 +170,50 @@ void setMotorPWM(uint8_t rxFrame[])
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, motor3_pwm / 100.0 * (period + 1));
 }
 
-void handlePressureModule()
+void handlePressureModule(float* pressure_out, float* temperature_out)
 {
+    *pressure_out = press_sensor.pressure_mbar;
+    *temperature_out = press_sensor.temperature_celsius;
 }
 
-// stm -> modules
-void handleModulesOut(uint8_t rxFrame[])
+void handleLED()
 {
-    HAL_GPIO_WritePin(
-        LED_GPIO_Port, LED_GPIO_PIN, (rxFrame[4] > 0));  // TODO: change after unbloating
+    if ((uartRxBuffer[4] & 0x1) != (led_status & 0x1))
+    {
+        led_status ^= 1;
+        HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
+    }
 }
 
-// modules -> stm
-void handleModulesIn()
+// Gathers data from all modules, constructs feedback frame and sends it
+void handleModules()
+{    
+    static uint8_t buffer[FEEDBACK_FRAME_BYTE_SIZE] = {0};
+
+    setMotorPWM(uartRxBuffer);
+    buffer[0] = motor_errors;
+
+    handleLED();
+    buffer[1] = led_status;
+
+    handlePressureModule((float*)&buffer[2], (float*)&buffer[6]);
+
+    // custom module handling goes here
+
+    buffer[FEEDBACK_FRAME_BYTE_SIZE - 1] = '\n';
+
+    HAL_UART_Transmit_IT(&huart2, buffer, sizeof(buffer));
+    HAL_UART_Receive_DMA(&huart2, uartRxBuffer, UART_RX_PACKAGE_SIZE);
+
+    RESET_HANDLE_MODULES_FLAG();
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef* huart)
 {
-    handlePressureModule();
-    // your custom module handler goes here
+    if (huart->Instance == USART2)
+    {
+        SET_HANDLE_MODULES_FLAG();
+    }
 }
 /* USER CODE END 0 */
 
@@ -208,10 +248,11 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_I2C1_Init();
-  MX_SPI1_Init();
-  MX_TIM1_Init();
   MX_USART2_UART_Init();
+  MX_TIM1_Init();
   /* USER CODE BEGIN 2 */
+    MS5837_Init(&hi2c1, &press_sensor, 50);
+   
     HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
     HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
     HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
@@ -220,28 +261,32 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  setupMotors();
+  HAL_UART_Receive_DMA(&huart2, uartRxBuffer, UART_RX_PACKAGE_SIZE);
 
-    uint8_t buffer[] = "abcdef\n";
-
-    setupMotors();
-
-    HAL_UART_Receive_DMA(&huart2, uartRxBuffer, UART_RX_PACKAGE_SIZE);
-
-    while (1)
+  while (1)
+  {
+    static uint32_t last_ms5837_tick = 0;
+    static uint32_t last_tick = 0;
+    if (HAL_GetTick() - last_ms5837_tick >= 100)
     {
-        // HAL_UART_Transmit_DMA(&huart2, buffer, sizeof(buffer));
+        last_ms5837_tick = HAL_GetTick();
+        MS5832_Process(&hi2c1, &press_sensor);
+    }
 
-        // heartbeat
-        if (HAL_GetTick() % 200 == 0)
-        {
-            ++*(uint32_t*)buffer;
-            HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);
-        }
+    if (handleModulesFlag == SET)
+        handleModules();
 
+    // heartbeat
+    if (HAL_GetTick() - last_tick >= 200)
+    {
+        HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);
+        last_tick = HAL_GetTick();
+    }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    }
+  }
   /* USER CODE END 3 */
 }
 
@@ -321,7 +366,7 @@ static void MX_I2C1_Init(void)
 
   /* USER CODE END I2C1_Init 1 */
   hi2c1.Instance = I2C1;
-  hi2c1.Init.Timing = 0x10D19CE4;
+  hi2c1.Init.Timing = 0xF011F1FF;
   hi2c1.Init.OwnAddress1 = 0;
   hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
@@ -354,46 +399,6 @@ static void MX_I2C1_Init(void)
 }
 
 /**
-  * @brief SPI1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_SPI1_Init(void)
-{
-
-  /* USER CODE BEGIN SPI1_Init 0 */
-
-  /* USER CODE END SPI1_Init 0 */
-
-  /* USER CODE BEGIN SPI1_Init 1 */
-
-  /* USER CODE END SPI1_Init 1 */
-  /* SPI1 parameter configuration*/
-  hspi1.Instance = SPI1;
-  hspi1.Init.Mode = SPI_MODE_MASTER;
-  hspi1.Init.Direction = SPI_DIRECTION_2LINES;
-  hspi1.Init.DataSize = SPI_DATASIZE_4BIT;
-  hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
-  hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
-  hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
-  hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
-  hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
-  hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
-  hspi1.Init.CRCPolynomial = 7;
-  hspi1.Init.CRCLength = SPI_CRC_LENGTH_DATASIZE;
-  hspi1.Init.NSSPMode = SPI_NSS_PULSE_ENABLE;
-  if (HAL_SPI_Init(&hspi1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN SPI1_Init 2 */
-
-  /* USER CODE END SPI1_Init 2 */
-
-}
-
-/**
   * @brief TIM1 Initialization Function
   * @param None
   * @retval None
@@ -405,6 +410,7 @@ static void MX_TIM1_Init(void)
 
   /* USER CODE END TIM1_Init 0 */
 
+  TIM_ClearInputConfigTypeDef sClearInputConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
   TIM_OC_InitTypeDef sConfigOC = {0};
   TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
@@ -413,13 +419,31 @@ static void MX_TIM1_Init(void)
 
   /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
-  htim1.Init.Prescaler = 79;
+  htim1.Init.Prescaler = 0;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim1.Init.Period = 19999;
+  htim1.Init.Period = 65535;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim1.Init.RepetitionCounter = 0;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_PWM_Init(&htim1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClearInputConfig.ClearInputState = ENABLE;
+  sClearInputConfig.ClearInputSource = TIM_CLEARINPUTSOURCE_OCREFCLR;
+  if (HAL_TIM_ConfigOCrefClear(&htim1, &sClearInputConfig, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_ConfigOCrefClear(&htim1, &sClearInputConfig, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_ConfigOCrefClear(&htim1, &sClearInputConfig, TIM_CHANNEL_3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_ConfigOCrefClear(&htim1, &sClearInputConfig, TIM_CHANNEL_4) != HAL_OK)
   {
     Error_Handler();
   }
@@ -547,17 +571,17 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, LED_Pin|SPI_CS_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : LED_Pin SPI_CS_Pin */
-  GPIO_InitStruct.Pin = LED_Pin|SPI_CS_Pin;
+  /*Configure GPIO pin : LED_Pin */
+  GPIO_InitStruct.Pin = LED_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  HAL_GPIO_Init(LED_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : LD3_Pin */
   GPIO_InitStruct.Pin = LD3_Pin;
@@ -572,29 +596,6 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-// TODO: on receive parse and send to proper peripherals
-// TODO: periodically send info from sensors to pc (use timer irq or maybe main loop might suffice)
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef* huart)
-{
-    if (huart->Instance == USART2)
-    {
-        setMotorPWM(uartRxBuffer);
-        // handleModulesOut(uartRxBuffer);
-
-        uint8_t buffer[8] = {
-            uartRxBuffer[1],
-            uartRxBuffer[2],
-            uartRxBuffer[3],
-            uartRxBuffer[4],
-            uartRxBuffer[5],
-            uartRxBuffer[6],
-            '\n',
-        };
-
-        HAL_UART_Transmit_IT(&huart2, buffer, sizeof(buffer));
-        HAL_UART_Receive_DMA(&huart2, uartRxBuffer, UART_RX_PACKAGE_SIZE);
-    }
-}
 
 /* USER CODE END 4 */
 
@@ -605,11 +606,11 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef* huart)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-    /* User can add his own implementation to report the HAL error return state */
-    __disable_irq();
-    while (1)
-    {
-    }
+  /* User can add his own implementation to report the HAL error return state */
+  __disable_irq();
+  while (1)
+  {
+  }
   /* USER CODE END Error_Handler_Debug */
 }
 #ifdef USE_FULL_ASSERT
@@ -623,8 +624,8 @@ void Error_Handler(void)
 void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */
-    /* User can add his own implementation to report the file name and line number,
-       ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
